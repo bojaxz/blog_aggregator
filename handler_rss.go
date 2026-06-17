@@ -2,10 +2,13 @@ package main
 
 import (
     "fmt"
-                "context"
-                "time"
-                "example.com/internal/database"
-                "github.com/google/uuid"
+    "context"
+    "time"
+		"strings"
+		"log"
+		"database/sql"
+    "example.com/internal/database"
+    "github.com/google/uuid"
 )
 
 func handlerAgg(s *state, cmd command) error {
@@ -56,6 +59,51 @@ func scrapeFeeds(s *state) error {
 	// iterate over the items in the feed and print their titles to the console
 	for _, feedItem := range feedXML.Channel.Item {
 		fmt.Println(feedItem.Title)
+
+		// parse the feedItem.PubDate to standard go format with time.Parse()
+		var publishedAt time.Time
+		var err error
+
+		// try standard RFC1123 with a numeric timezone offset first
+		publishedAt, err = time.Parse(time.RFC1123Z, feedItem.PubDate)
+		if err != nil {
+			// if that fails, try standard RFC1123 with a named timezone
+			publishedAt, err = time.Parse(time.RFC1123, feedItem.PubDate)
+			if err != nil {
+				// handle the error if the time doesnt match either layout
+				return fmt.Errorf("unable to parse PubDate to RFC1123Z or RFC1123 with error: %w", err)
+			}
+		}
+
+		// handle nullable description string (sql.NullString is different than an empty go string)
+		description := sql.NullString{}
+		if feedItem.Description != "" {
+			description.String = feedItem.Description
+			description.Valid = true
+		}
+
+		createdFeed, err := s.db.CreatePost(context.Background(), database.CreatePostParams{
+			ID: uuid.New(),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
+			Title: feedItem.Title,
+			Url: feedItem.Link,
+			Description: description,
+			PublishedAt: sql.NullTime{
+				Time: publishedAt,
+				Valid: true,
+			},
+			FeedID: feed.ID,
+		})
+		if err != nil {
+			if strings.Contains(err.Error(), "duplicate key") || strings.Contains(err.Error(), "unique constraint") {
+				continue // ingore this duplicate and keep processing other posts!
+			}
+			log.Printf("unable to create feed %s with error: %v", feed.ID, err)
+		}
+
+		// print createdFeed
+		fmt.Printf("new post created: %s", createdFeed)
 	}
 
 	return nil
